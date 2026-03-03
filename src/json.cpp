@@ -1,23 +1,5 @@
 /* json builtin - Parse JSON and create bash associative array variables */
 
-/*
-   Copyright (C) 2024-2026 Free Software Foundation, Inc.
-
-   This file is part of GNU Bash.
-   Bash is free software: you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published by
-   the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
-
-   Bash is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with Bash.  If not, see <http://www.gnu.org/licenses/>.
-*/
-
 /* We must include the bash C headers inside extern "C" but handle the
    strchrnul conflict: bash's externs.h declares strchrnul() with C linkage
    when HAVE_STRCHRNUL is not defined, but glibc's <string.h> in C++ mode
@@ -354,15 +336,33 @@ static std::string read_file_contents(const char *path) {
      json -v VARNAME <<< '{"key":"val"}'
    ================================================================ */
 
+/* Apply a JSON Pointer selector to a JSON value.
+   Returns a new heap-allocated njson* with the selected sub-value,
+   or nullptr on error (after printing a message). */
+static njson *apply_selector(njson *root, const char *selector) {
+  try {
+    njson::json_pointer ptr(selector);
+    njson *result = new njson(root->at(ptr));
+    return result;
+  } catch (const njson::out_of_range &e) {
+    builtin_error("selector '%s': %s", selector, e.what());
+    return nullptr;
+  } catch (const njson::parse_error &e) {
+    builtin_error("invalid JSON Pointer '%s': %s", selector, e.what());
+    return nullptr;
+  }
+}
+
 extern "C" int json_builtin(WORD_LIST *list) {
   const char *varname = nullptr;
   const char *json_string = nullptr;
   const char *filename = nullptr;
   const char *addr_string = nullptr;
+  const char *selector = nullptr;
   int opt;
 
   reset_internal_getopt();
-  while ((opt = internal_getopt(list, const_cast<char *>("v:j:f:a:"))) != -1) {
+  while ((opt = internal_getopt(list, const_cast<char *>("v:j:f:a:s:"))) != -1) {
     switch (opt) {
       CASE_HELPOPT;
     case 'v':
@@ -376,6 +376,9 @@ extern "C" int json_builtin(WORD_LIST *list) {
       break;
     case 'a':
       addr_string = list_optarg;
+      break;
+    case 's':
+      selector = list_optarg;
       break;
     default:
       builtin_usage();
@@ -410,6 +413,16 @@ extern "C" int json_builtin(WORD_LIST *list) {
     }
     /* Make a deep copy so the new variable owns its own objects. */
     njson *copy = new njson(*(it->second));
+
+    /* Apply selector if given. */
+    if (selector) {
+      njson *selected = apply_selector(copy, selector);
+      delete copy;
+      if (!selected)
+        return EXECUTION_FAILURE;
+      copy = selected;
+    }
+
     return populate_var(varname, copy);
   }
 
@@ -441,6 +454,15 @@ extern "C" int json_builtin(WORD_LIST *list) {
     return EXECUTION_FAILURE;
   }
 
+  /* Apply selector if given. */
+  if (selector) {
+    njson *selected = apply_selector(root, selector);
+    delete root;
+    if (!selected)
+      return EXECUTION_FAILURE;
+    root = selected;
+  }
+
   /* Populate variables. */
   return populate_var(varname, root);
 }
@@ -467,13 +489,14 @@ extern "C" {
 const char *json_doc[] = {
     "Parse JSON and create bash variables from JSON data.",
     "",
-    "Usage: json -v VARNAME [-j JSON_STRING | -f FILE | -a POINTER]",
+    "Usage: json -v VARNAME [-j JSON | -f FILE | -a PTR] [-s POINTER]",
     "",
     "Options:",
     "  -v VARNAME    Name of the variable to create (required)",
     "  -j STRING     Parse JSON from a string argument",
     "  -f FILE       Parse JSON from a file",
     "  -a POINTER    Use an existing JSON pointer (from VARNAME_[key])",
+    "  -s POINTER    Select a sub-value using JSON Pointer (RFC 6901)",
     "",
     "If no -j, -f, or -a is given, JSON is read from stdin.",
     "",
@@ -485,6 +508,12 @@ const char *json_doc[] = {
     "VARNAME maps keys/indices to display values.",
     "VARNAME_ maps keys/indices to internal JSON pointers (for -a).",
     "",
+    "JSON Pointer syntax (RFC 6901):",
+    "  /key           select object member 'key'",
+    "  /0             select array element at index 0",
+    "  /a/b/c         select nested path a -> b -> c",
+    "  /users/0/name  mixed object/array traversal",
+    "",
     "Examples:",
     "  json -v data -j '{\"name\": \"John\", \"age\": 30}'",
     "  echo ${data[name]}              # John",
@@ -492,6 +521,10 @@ const char *json_doc[] = {
     "",
     "  json -v arr -j '[\"foo\", \"bar\"]'",
     "  echo ${arr[0]}                  # foo",
+    "",
+    "  # Select a nested value directly:",
+    "  json -v l3 -j '{\"a\":{\"b\":{\"c\":\"deep\"}}}' -s '/a/b'",
+    "  echo ${l3[c]}                   # deep",
     "",
     "  # Navigate into nested objects:",
     "  json -v addr -a \"${data_[address]}\"",
@@ -506,7 +539,7 @@ struct builtin json_struct = {
     json_builtin,                            /* function implementing the builtin */
     BUILTIN_ENABLED,                         /* initial flags for builtin */
     const_cast<char *const *>(json_doc),     /* array of long documentation strings */
-    const_cast<char *>("json -v VAR [-j JSON | -f FILE | -a PTR]"), /* usage synopsis */
+    const_cast<char *>("json -v VAR [-j JSON | -f FILE | -a PTR] [-s POINTER]"), /* usage synopsis */
     0                                        /* reserved for internal use */
 };
 
