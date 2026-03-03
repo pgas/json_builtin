@@ -1,0 +1,20 @@
+I want to be iterate over the elements of a json object
+json -v var -a '{"name":"John", "age":12}'
+I want to be able to do `for e in "${var[@]}";do echo "$e";done`
+to iterate over the representation of the elements of the json object.
+
+I also want to be able to iterate over the pointer
+```
+for a in "${var_[@]}"; do json -v e -a "$a";echo "$e";done
+```
+
+I also now want to add support of array 
+json -v var -a '[ "foo", "bar"]' 
+should create var a scalar index 
+for `echo ${var[0]}` should print foo
+echo "${var_[0]}" should print the address
+the code should handle the nested json and all combinations of object and array.
+e.g
+json -v var -a '{ "k": 12, "l": [ 1, { "k": "foo"}]}
+
+Please add good testing of the various combinations

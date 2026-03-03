@@ -1,0 +1,30 @@
+I want to make a json builtin this builtin should be able to 
+* read json from stdin (eg json <<< "{ ...}")
+* read json from a file (eg json -f file.json)
+* from an argument eg (eg json -j '"{...}")
+* the result is saved in a variable (eg json -v var -a "{...}")
+
+the Variable will be a special variable, in fact  when setting var I want to have to have automatically created 2 special var
+* var when expanding this variable, it should pretty print the representation of the objet
+* var_ when expanded it should result in the pointer to the internal json object
+
+we will decide later what setting the variables will mean
+
+I want to use C++
+I want to use nlohmann/json
+
+let's not consider array in json for now.
+
+var will be associative array. 
+var[element] will expsnd to the printed value of the element in the json object.
+var_[element] will expand to the pointer to the internal json object of the element.
+
+json -v var -a '{"name": "John", "age": 30, "address" : { "line1": "red street", "line2" : "cambrdidge"}}'
+echo ${var[name]} # print "John"
+echo ${var[address]} # print {"line1": ...., "line2":...}
+
+json will allow to assign a variable to part of the json object.
+json -v var2 -a ${var_[name]} # will create a simple variable
+json -v var2 -a "${var_[address]}" will create 2 special variable var2 and var2_ that works just like  if we have parse adress from a string.
+
+make a plan to have the implementation fully tested
