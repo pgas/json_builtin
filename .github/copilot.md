@@ -7,17 +7,20 @@ This file contains guidelines for GitHub Copilot when assisting with development
 **json_builtin** is a dynamically-loadable bash builtin written in C++20 that parses JSON and creates bash variables for accessing JSON data. It works by:
 
 1. Parsing JSON from various sources (`-j` string, `-f` file, stdin, or `-a` pointer)
-2. Creating two bash variables per invocation:
+2. Creating three bash variables per invocation:
    - Display variable (e.g., `var`): maps keys/indices to pretty-printed values
    - Pointer variable (e.g., `var_`): maps keys/indices to hex-encoded memory addresses of live JSON objects
+   - Root pointer scalar (e.g., `var__`, two underscores): the address of the entire document root
 3. Allowing navigation through nested structures by passing pointers with `-a` flag
 4. Supporting JSON Pointer selectors (RFC 6901) with `-s` flag for direct deep access
+5. Applying JSON Patch (RFC 6902) transformations with `-p` flag
+6. Applying JSON Merge Patch (RFC 7396) transformations with `-m` flag
 
 ## Code Structure
 
 **File Organization:**
-- `src/json.cpp` (547 lines) — entire implementation, organized into 10 logical sections separated by detailed comments
-- `tests/test_*.sh` — 20 bash test scripts serving as specifications for desired behavior
+- `src/json.cpp` (~940 lines) — entire implementation, organized into logical sections separated by detailed comments
+- `tests/test_*.sh` — 26 bash test scripts serving as specifications for desired behavior
 - `CMakeLists.txt` — project configuration using FetchContent for nlohmann/json
 - `src/CMakeLists.txt` — builds `json.so` as a CMake MODULE library
 
@@ -118,18 +121,29 @@ assoc_insert(h, (char *)"key", (char *)"value");  // Bash will free stack memory
 
 ### 4. Option Parsing
 
-**Current pattern in `json_builtin()`:**
+**Current option string in `json_builtin()`:**
 ```cpp
-const char *selector = nullptr;
-while ((opt = internal_getopt(list, const_cast<char *>("v:j:f:a:s:"))) != -1) {
+const char *selector  = nullptr;
+const char *patch_arg = nullptr;  /* -p: JSON Patch (RFC 6902) */
+const char *merge_arg = nullptr;  /* -m: JSON Merge Patch (RFC 7396) */
+while ((opt = internal_getopt(list, const_cast<char *>("v:j:f:a:s:p:m:"))) != -1) {
   switch (opt) {
-    case 's':
-      selector = list_optarg;
-      break;
+    case 's': selector  = list_optarg; break;
+    case 'p': patch_arg = list_optarg; break;
+    case 'm': merge_arg = list_optarg; break;
     // ...
   }
 }
 ```
+
+**Patch / merge arguments** are resolved by `resolve_patch_arg(arg, "p"|"m")`:
+- If `arg` starts with `0x` and is found in `g_registry` → deep copy of the registered object.
+- Otherwise → parse `arg` as inline JSON (JSON5 comments allowed).
+
+**`var__` (double underscore) root pointer:**
+Each object/array variable also binds a plain scalar `varname__` holding the hex address of
+the document root. Scalars already expose the root via `varname_`. Use `$var__` with `-a`,
+`-p`, or `-m` to refer to wholes documents.
 
 **To add a new option:**
 1. Add letter and `:` to option string if it takes an argument

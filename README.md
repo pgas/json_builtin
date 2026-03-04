@@ -11,9 +11,15 @@ A dynamically-loadable bash builtin for parsing JSON and creating bash variables
 - **Deep Nesting Support**: Navigate arbitrary nesting levels using pointer variables, allowing re-parsing from intermediate JSON objects
 - **Full Iteration Support**: Iterate over all JSON elements using standard bash array syntax (`${var[@]}`)
 - **JSON Pointer Selectors**: Use RFC 6901 JSON Pointer syntax (`-s` flag) for direct deep access without intermediate steps
-- **Dual Variable System**: Each invocation creates two variables:
+- **JSON Patch (RFC 6902)**: Apply a sequence of `add`, `remove`, `replace`, `move`, `copy`, `test` operations via `-p`
+- **JSON Merge Patch (RFC 7396)**: Merge an object patch (present keys overwrite, `null` keys delete) via `-m`
+- **Dual Variable System**: Each invocation creates three bash variables:
   - Display variable (e.g., `mydata`): maps keys/indices to pretty-printed values
   - Pointer variable (e.g., `mydata_`): maps keys/indices to internal memory addresses for re-parsing
+  - Root pointer scalar (e.g., `mydata__`): the memory address of the entire document (for `-a`, `-p`, `-m`)
+- **Assignment Callbacks**: Assigning `var[key]=value` or `var_[key]=ptr` updates the underlying JSON in-place
+- **Display Configuration**: `JSON_BASH_INDENT` and `JSON_BASH_ENSURE_ASCII` shell variables control output formatting
+- **JSON5 Comment Support**: Single-line (`//`) and block (`/* */`) comments are stripped before parsing
 - **Memory Management**: Automatic tracking and cleanup of heap-allocated JSON objects
 
 ## Building
@@ -180,7 +186,28 @@ Each call to `json` creates two bash variables:
   - `${var_[key]}` → `0x7f1234567890` (pointer to nested JSON object)
 - For **arrays**: indexed array with indices mapped to pointers
   - `${var_[0]}` → `0x7f1234567890`
-- For **scalars**: empty (no pointer available)
+- For **scalars**: simple string with the root pointer
+  - `$var_` → `0x7f1234567890`
+
+### Root Pointer Scalar (`VARNAME__`)
+
+A plain scalar variable holding the memory address of the **entire document** root.
+
+- `$var__` → `0x7f1234567890` (always a simple `$var__` expansion)
+- Available for **objects** and **arrays** (for scalars, `$var_` already serves this role)
+- Use it with `-a` to re-parse the whole document, or with `-p` / `-m` to pass a pre-parsed patch/merge argument
+
+```bash
+json -v cfg -j '{"host":"localhost","port":8080}'
+# Re-parse the whole document via its root pointer
+json -v cfg2 -a "$cfg__"      # equivalent to re-parsing from JSON text
+echo "${cfg2[host]}"          # localhost
+
+# Use a pre-parsed merge patch via root pointer
+json -v patch -j '{"port":9090}'
+json -v cfg3 -a "$cfg__" -m "$patch__"
+echo "${cfg3[port]}"          # 9090
+```
 
 **Purpose of Pointers:**
 Pointers enable re-parsing intermediate JSON structures without rebuilding from text:
@@ -313,6 +340,60 @@ json -v meta -a "${doc_[metadata]}"
 echo "Count: ${meta[count]}"
 ```
 
+### Example: JSON Patch (RFC 6902)
+
+```bash
+json -v doc -j '{"name":"Alice","score":0,"temp":"remove-me"}'
+
+# Apply patch inline
+json -v doc -a "$doc__" \
+  -p '[
+    {"op":"replace","path":"/score","value":99},
+    {"op":"remove","path":"/temp"},
+    {"op":"add","path":"/rank","value":"gold"}
+  ]'
+
+echo "${doc[name]}"   # Alice
+echo "${doc[score]}"  # 99
+echo "${doc[rank]}"   # gold
+echo "${doc[temp]}"   # (empty — removed)
+```
+
+Pass a pre-parsed patch document via its root pointer (`$patch__`):
+
+```bash
+json -v patch -j '[{"op":"add","path":"/x","value":1}]'
+json -v result -j '{"y":2}' -p "$patch__"
+echo "${result[x]}"  # 1
+```
+
+### Example: JSON Merge Patch (RFC 7396)
+
+```bash
+json -v doc -j '{"a":1,"b":2,"c":"old"}'
+
+# Keys in the merge object overwrite; null keys delete
+json -v doc -a "$doc__" -m '{"b":99,"c":null,"d":"new"}'
+echo "${doc[a]}"  # 1
+echo "${doc[b]}"  # 99
+echo "${doc[c]}"  # (empty — deleted by null)
+echo "${doc[d]}"  # new
+```
+
+### Example: Chaining Patch and Merge
+
+`-p` and `-m` can both be specified in the same invocation. The patch is applied first:
+
+```bash
+json -v doc -j '{"v":0,"drop":1}'
+json -v doc -a "$doc__" \
+  -p '[{"op":"replace","path":"/v","value":7}]' \
+  -m '{"drop":null,"extra":"ok"}'
+echo "${doc[v]}"      # 7
+echo "${doc[drop]}"   # (empty)
+echo "${doc[extra]}"  # ok
+```
+
 ## Implementation Notes
 
 ### Design Principles
@@ -327,15 +408,11 @@ echo "Count: ${meta[count]}"
 
 ## Limitations
 
-1. **Top-Level Arrays**: The builtin currently requires a JSON object or scalar at the root. To parse a top-level array, wrap it: `{"data": [...]}`
+1. **Type Information**: All values become bash strings. JSON's distinction between `"42"` (string) and `42` (number) is lost.
 
-2. **Type Information**: All values become bash strings. JSON's distinction between `"42"` (string) and `42` (number) is lost.
+2. **Partial JSON5**: Only `//` and `/* */` comments are stripped. Other JSON5 extensions (trailing commas, unquoted keys, etc.) cause parse errors.
 
-3. **JSON5 Support**: Only strict JSON is supported (RFC 7159). JSON5 features (comments, trailing commas, etc.) will cause parse errors.
-
-4. **Compact Output**: JSON is always pretty-printed in display variables. No option for compact output.
-
-5. **Limited Bash Compatibility**: Requires a bash version built with dynamically-loadable builtins feature. Most distributions have this enabled.
+3. **Limited Bash Compatibility**: Requires a bash version built with dynamically-loadable builtins. Most distributions have this enabled.
 
 ## Memory Management
 
@@ -357,7 +434,7 @@ echo "Count: ${meta[count]}"
 
 ## Testing
 
-The project includes 20 comprehensive test files covering:
+The project includes 26 comprehensive test files covering:
 
 - **Basic Parsing** (`test_basic.sh`) — objects, arrays, scalars
 - **Input Sources** (`test_file.sh`, `test_stdin.sh`) — file and stdin input
@@ -367,6 +444,11 @@ The project includes 20 comprehensive test files covering:
 - **Navigation** (`test_pointer.sh`, `test_reassign.sh`, `test_iterate_pointers.sh`) — pointer-based navigation
 - **Selectors** (`test_selector_object.sh`, `test_selector_array.sh`, `test_selector_combined.sh`) — JSON Pointer support
 - **Error Handling** (`test_errors.sh`) — invalid input and error cases
+- **JSON5 Comments** (`test_json5_comments.sh`) — `//` and `/* */` comment stripping
+- **Display Format** (`test_display_format.sh`) — `JSON_BASH_INDENT`, `JSON_BASH_ENSURE_ASCII`
+- **Assignment Callbacks** (`test_assign_display.sh`, `test_assign_pointer.sh`) — in-place mutation
+- **JSON Patch** (`test_json_patch.sh`) — RFC 6902 add/remove/replace/move/copy/test
+- **JSON Merge Patch** (`test_json_merge_patch.sh`) — RFC 7396 merge semantics
 
 Run all tests with:
 
@@ -439,5 +521,7 @@ Key files to understand:
 ## References
 
 - [nlohmann/json library](https://github.com/nlohmann/json) — JSON parsing
-- [RFC 6901 JSON Pointer](https://tools.ietf.org/html/rfc6901) — selector syntax
+- [RFC 6901 JSON Pointer](https://tools.ietf.org/html/rfc6901) — selector syntax (`-s`)
+- [RFC 6902 JSON Patch](https://tools.ietf.org/html/rfc6902) — patch operations (`-p`)
+- [RFC 7396 JSON Merge Patch](https://tools.ietf.org/html/rfc7396) — merge semantics (`-m`)
 - [Bash Builtins documentation](https://www.gnu.org/software/bash/manual/html_node/Bash-Builtins.html)

@@ -16,7 +16,7 @@ BOLD='\033[1m';  DIM='\033[2m';   RESET='\033[0m'
 CYAN='\033[36m'; GREEN='\033[32m'; YELLOW='\033[33m'
 BLUE='\033[34m'; RED='\033[31m';   MAGENTA='\033[35m'
 
-TOTAL_STEPS=10   # update when adding steps
+TOTAL_STEPS=11   # update when adding steps
 
 # ── helpers ───────────────────────────────────────────────
 
@@ -382,13 +382,55 @@ step10() {
       printf \"  [%d] %-8s %s\n\" \"\$i\" \"\${u[name]}\" \"\${u[role]}\"
     done"
   blank
+  printf "  ${BOLD}${GREEN}Press any key for JSON Patch / Merge Patch …${RESET}\n"
+}
+
+step11() {
+  header "JSON Patch (RFC 6902) & JSON Merge Patch (RFC 7396)" 11
+  blank
+  comment "-p applies an array of patch operations (add / remove / replace …)"
+  run_show 'json -v doc -j '"'"'{"a":1,"b":2,"c":3}'"'"'
+  json -v doc -a "${doc__}" \
+    -p '"'"'[{"op":"replace","path":"/a","value":99},{"op":"remove","path":"/c"}]'"'"'
+  echo "a=${doc[a]}  b=${doc[b]}  c='"'"'${doc[c]}'"'"'"' \
+       bash -c "
+  enable -f '$SO_PATH' json
+  json -v doc -j '{\"a\":1,\"b\":2,\"c\":3}'
+  json -v doc -a \"\${doc__}\" \
+    -p '[{\"op\":\"replace\",\"path\":\"/a\",\"value\":99},{\"op\":\"remove\",\"path\":\"/c\"}]'
+  echo \"a=\${doc[a]}  b=\${doc[b]}  c='\${doc[c]}'\""
+  blank
+  comment "-m merges: present keys overwrite, null keys remove"
+  run_show 'json -v doc -j '"'"'{"a":1,"b":2,"keep":"yes"}'"'"'
+  json -v doc -a "${doc__}" -m '"'"'{"b":null,"c":3}'"'"'
+  echo "a=${doc[a]}  b='"'"'${doc[b]}'"'"'  c=${doc[c]}  keep=${doc[keep]}"' \
+       bash -c "
+  enable -f '$SO_PATH' json
+  json -v doc -j '{\"a\":1,\"b\":2,\"keep\":\"yes\"}'
+  json -v doc -a \"\${doc__}\" -m '{\"b\":null,\"c\":3}'
+  echo \"a=\${doc[a]}  b='\${doc[b]}'  c=\${doc[c]}  keep=\${doc[keep]}\""
+  blank
+  comment "-p and -m chain: patch runs first, then merge"
+  run_show 'json -v doc -j '"'"'{"a":0,"rem":"bye"}'"'"'
+  json -v doc -a "${doc__}" \
+    -p '"'"'[{"op":"replace","path":"/a","value":7}]'"'"' \
+    -m '"'"'{"rem":null,"new":"hi"}'"'"'
+  echo "a=${doc[a]}  rem='"'"'${doc[rem]}'"'"'  new=${doc[new]}"' \
+       bash -c "
+  enable -f '$SO_PATH' json
+  json -v doc -j '{\"a\":0,\"rem\":\"bye\"}'
+  json -v doc -a \"\${doc__}\" \
+    -p '[{\"op\":\"replace\",\"path\":\"/a\",\"value\":7}]' \
+    -m '{\"rem\":null,\"new\":\"hi\"}'
+  echo \"a=\${doc[a]}  rem='\${doc[rem]}'  new=\${doc[new]}\""
+  blank
   printf "  ${BOLD}${GREEN}End of showcase.${RESET}  See README.md for full documentation.\n"
 }
 
 # ══════════════════════════════════════════════════════════
 # Main loop
 # ══════════════════════════════════════════════════════════
-STEPS=(step1 step2 step3 step4 step5 step6 step7 step8 step9 step10)
+STEPS=(step1 step2 step3 step4 step5 step6 step7 step8 step9 step10 step11)
 
 for step_fn in "${STEPS[@]}"; do
   "$step_fn"

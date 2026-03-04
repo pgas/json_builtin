@@ -135,6 +135,9 @@ static uintptr_t hex_to_ptr(const char *s) {
   return (uintptr_t)val;
 }
 
+/* Forward declaration — defined below populate helpers. */
+static void remove_var(const char *name);
+
 /* Register a heap-allocated njson* and associate it with varname. */
 static uintptr_t register_json(const std::string &varname, njson *p) {
   uintptr_t addr = (uintptr_t)p;
@@ -158,6 +161,8 @@ static void release_var(const std::string &varname) {
   }
   g_var_objects.erase(it);
   g_var_root.erase(varname);
+  /* Remove the root-pointer scalar if it exists. */
+  remove_var((varname + "__").c_str());
 }
 
 /* Release everything (called on unload). */
@@ -508,6 +513,10 @@ static int populate_object(const char *varname, njson *root) {
     assoc_put(v_ptr, key.c_str(), ptr_to_hex(sub));
   }
 
+  /* Expose the root pointer as a plain scalar  varname__  (two underscores)
+     so callers can retrieve the whole document to pass to -a, -p, or -m. */
+  bind_variable((sname + "__").c_str(), ptr_to_hex(root).c_str(), 0);
+
   /* Install assign-function hooks so bash assignment propagates. */
   v_display->assign_func = json_display_assign;
   v_ptr->assign_func     = json_ptr_assign;
@@ -553,6 +562,9 @@ static int populate_array(const char *varname, njson *root) {
 
     idx++;
   }
+
+  /* Expose the root pointer as a plain scalar  varname__. */
+  bind_variable((sname + "__").c_str(), ptr_to_hex(root).c_str(), 0);
 
   /* Install assign-function hooks. */
   v_display->assign_func = json_display_assign;
@@ -650,16 +662,58 @@ static njson *apply_selector(njson *root, const char *selector) {
   }
 }
 
+/* ================================================================
+   resolve_patch_arg  —  resolve a -p / -m argument to a fresh njson.
+
+   The argument may be either:
+     • a hex pointer ("0x...")  recognised as an address in g_registry,
+       in which case a deep copy of the registered object is returned;
+     • an inline JSON string, which is parsed with JSON5 comment support.
+
+   Returns a heap-allocated njson* (caller must delete), or nullptr on
+   error (error message already printed).
+   ================================================================ */
+static njson *resolve_patch_arg(const char *arg, const char *opt_name) {
+  if (!arg || *arg == '\0') {
+    builtin_error("-%s: empty argument", opt_name);
+    return nullptr;
+  }
+
+  /* Try hex pointer first: must start with '0' 'x' or a plain hex digit. */
+  if (arg[0] == '0' && (arg[1] == 'x' || arg[1] == 'X')) {
+    uintptr_t addr = hex_to_ptr(arg);
+    if (addr != 0) {
+      auto it = g_registry.find(addr);
+      if (it != g_registry.end())
+        return new njson(*(it->second)); /* deep copy */
+      /* Looks like a pointer but not in registry — fall through to JSON parse
+         so the user gets a useful error instead of a silent success. */
+      builtin_error("-%s: unknown JSON pointer (freed?): %s", opt_name, arg);
+      return nullptr;
+    }
+  }
+
+  /* Parse as inline JSON. */
+  try {
+    return new njson(json_try_parse(arg));
+  } catch (const njson::parse_error &e) {
+    builtin_error("-%s: invalid JSON: %s", opt_name, e.what());
+    return nullptr;
+  }
+}
+
 extern "C" int json_builtin(WORD_LIST *list) {
   const char *varname = nullptr;
   const char *json_string = nullptr;
   const char *filename = nullptr;
   const char *addr_string = nullptr;
   const char *selector = nullptr;
+  const char *patch_arg = nullptr;   /* -p: JSON Patch (RFC 6902) */
+  const char *merge_arg = nullptr;   /* -m: JSON Merge Patch (RFC 7396) */
   int opt;
 
   reset_internal_getopt();
-  while ((opt = internal_getopt(list, const_cast<char *>("v:j:f:a:s:"))) != -1) {
+  while ((opt = internal_getopt(list, const_cast<char *>("v:j:f:a:s:p:m:"))) != -1) {
     switch (opt) {
       CASE_HELPOPT;
     case 'v':
@@ -676,6 +730,12 @@ extern "C" int json_builtin(WORD_LIST *list) {
       break;
     case 's':
       selector = list_optarg;
+      break;
+    case 'p':
+      patch_arg = list_optarg;
+      break;
+    case 'm':
+      merge_arg = list_optarg;
       break;
     default:
       builtin_usage();
@@ -720,6 +780,32 @@ extern "C" int json_builtin(WORD_LIST *list) {
       copy = selected;
     }
 
+    /* Apply JSON Patch (RFC 6902) if requested. */
+    if (patch_arg) {
+      njson *patch = resolve_patch_arg(patch_arg, "p");
+      if (!patch) { delete copy; return EXECUTION_FAILURE; }
+      njson *patched = nullptr;
+      try {
+        patched = new njson(copy->patch(*patch));
+      } catch (const std::exception &e) {
+        builtin_error("json patch failed: %s", e.what());
+        delete patch;
+        delete copy;
+        return EXECUTION_FAILURE;
+      }
+      delete patch;
+      delete copy;
+      copy = patched;
+    }
+
+    /* Apply JSON Merge Patch (RFC 7396) if requested. */
+    if (merge_arg) {
+      njson *merge = resolve_patch_arg(merge_arg, "m");
+      if (!merge) { delete copy; return EXECUTION_FAILURE; }
+      copy->merge_patch(*merge);
+      delete merge;
+    }
+
     return populate_var(varname, copy);
   }
 
@@ -760,6 +846,32 @@ extern "C" int json_builtin(WORD_LIST *list) {
     root = selected;
   }
 
+  /* Apply JSON Patch (RFC 6902) if requested. */
+  if (patch_arg) {
+    njson *patch = resolve_patch_arg(patch_arg, "p");
+    if (!patch) { delete root; return EXECUTION_FAILURE; }
+    njson *patched = nullptr;
+    try {
+      patched = new njson(root->patch(*patch));
+    } catch (const std::exception &e) {
+      builtin_error("json patch failed: %s", e.what());
+      delete patch;
+      delete root;
+      return EXECUTION_FAILURE;
+    }
+    delete patch;
+    delete root;
+    root = patched;
+  }
+
+  /* Apply JSON Merge Patch (RFC 7396) if requested. */
+  if (merge_arg) {
+    njson *merge = resolve_patch_arg(merge_arg, "m");
+    if (!merge) { delete root; return EXECUTION_FAILURE; }
+    root->merge_patch(*merge);
+    delete merge;
+  }
+
   /* Populate variables. */
   return populate_var(varname, root);
 }
@@ -786,7 +898,7 @@ extern "C" {
 const char *json_doc[] = {
     "Parse JSON and create bash variables from JSON data.",
     "",
-    "Usage: json -v VARNAME [-j JSON | -f FILE | -a PTR] [-s POINTER]",
+    "Usage: json -v VARNAME [-j JSON | -f FILE | -a PTR] [-s POINTER] [-p PATCH] [-m MERGE]",
     "",
     "Options:",
     "  -v VARNAME    Name of the variable to create (required)",
@@ -794,6 +906,10 @@ const char *json_doc[] = {
     "  -f FILE       Parse JSON from a file          (JSON5 comments allowed)",
     "  -a POINTER    Use an existing JSON pointer (from VARNAME_[key])",
     "  -s POINTER    Select a sub-value using JSON Pointer (RFC 6901)",
+    "  -p PATCH      Apply a JSON Patch (RFC 6902) — PATCH is an inline JSON",
+    "                string or a hex pointer to an array of patch operations",
+    "  -m MERGE      Apply a JSON Merge Patch (RFC 7396) — MERGE is an inline",
+    "                JSON string or a hex pointer to a merge-patch object",
     "",
     "If no -j, -f, or -a is given, JSON is read from stdin.",
     "",
@@ -853,6 +969,18 @@ const char *json_doc[] = {
     "",
     "  # Iterate over pointers:",
     "  for a in \"${data_[@]}\"; do json -v e -a \"$a\"; echo \"$e\"; done",
+    "",
+    "JSON Patch (RFC 6902):",
+    "  Patch operations: add, remove, replace, move, copy, test.",
+    "  -p may be an inline JSON array or a pointer to a parsed array.",
+    "  json -v result -j '{\"a\":1}' -p '[{\"op\":\"add\",\"path\":\"/b\",\"value\":2}]'",
+    "  # result = {\"a\":1,\"b\":2}",
+    "",
+    "JSON Merge Patch (RFC 7396):",
+    "  Keys present in MERGE overwrite the source; null values remove keys.",
+    "  -m may be an inline JSON object or a pointer to a parsed object.",
+    "  json -v result -j '{\"a\":1,\"b\":2}' -m '{\"b\":null,\"c\":3}'",
+    "  # result = {\"a\":1,\"c\":3}",
     (char *)NULL};
 
 struct builtin json_struct = {
@@ -860,7 +988,7 @@ struct builtin json_struct = {
     json_builtin,                            /* function implementing the builtin */
     BUILTIN_ENABLED,                         /* initial flags for builtin */
     const_cast<char *const *>(json_doc),     /* array of long documentation strings */
-    const_cast<char *>("json -v VAR [-j JSON | -f FILE | -a PTR] [-s POINTER]"), /* usage synopsis */
+    const_cast<char *>("json -v VAR [-j JSON | -f FILE | -a PTR] [-s PTR] [-p PATCH] [-m MERGE]"), /* usage synopsis */
     0                                        /* reserved for internal use */
 };
 
