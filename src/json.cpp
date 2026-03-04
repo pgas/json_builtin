@@ -702,6 +702,90 @@ static njson *resolve_patch_arg(const char *arg, const char *opt_name) {
   }
 }
 
+/* ================================================================
+   bash_var_to_json  —  serialize a bash variable to a JSON value.
+
+   Handles the following bash variable types:
+     - Associative array  → JSON object  (values parsed as JSON with
+                                          string fallback)
+     - Indexed array      → JSON array   (elements parsed as JSON with
+                                          string fallback; gaps filled
+                                          with JSON null)
+     - Integer variable   → JSON number
+     - String variable    → JSON string
+
+   If the variable carries the integer attribute (declare -i), every
+   scalar value is converted to a JSON number instead of a string.
+   For all other variables each element value is first tried as an
+   inline JSON parse (so bare numbers, true/false/null are preserved)
+   and falls back to a plain JSON string on parse failure.
+   ================================================================ */
+static njson *bash_var_to_json(const char *varname) {
+  SHELL_VAR *v = find_variable(varname);
+  if (!v) {
+    builtin_error("%s: variable not found", varname);
+    return nullptr;
+  }
+  if (!var_isset(v)) {
+    builtin_error("%s: variable is unset", varname);
+    return nullptr;
+  }
+
+  /* Convert a single C string to a JSON value honouring the integer
+     attribute on the owning variable. */
+  auto str_to_json = [&](const char *val) -> njson {
+    if (!val) val = "";
+    if (integer_p(v)) {
+      try { return njson(std::stoll(val)); } catch (...) {}
+    }
+    /* Try JSON parse first so bare numbers / booleans / null survive. */
+    try { return json_try_parse(val); } catch (...) {}
+    return njson(std::string(val));
+  };
+
+  if (assoc_p(v)) {
+    /* Associative array  →  JSON object */
+    njson *obj = new njson(njson::object());
+    HASH_TABLE *h = assoc_cell(v);
+    if (h) {
+      for (int i = 0; i < h->nbuckets; i++) {
+        for (BUCKET_CONTENTS *item = h->bucket_array[i]; item; item = item->next) {
+          const char *key = item->key;
+          const char *val = static_cast<const char *>(item->data);
+          (*obj)[key] = str_to_json(val);
+        }
+      }
+    }
+    return obj;
+  }
+
+  if (array_p(v)) {
+    /* Indexed array  →  JSON array (sparse gaps filled with null) */
+    njson *arr = new njson(njson::array());
+    ARRAY *a = array_cell(v);
+    if (a && !array_empty(a)) {
+      ARRAY_ELEMENT *ae = element_forw(a->head);
+      while (ae != a->head) {
+        arrayind_t idx = element_index(ae);
+        /* Fill any gap with JSON null. */
+        while (static_cast<arrayind_t>(arr->size()) < idx)
+          arr->push_back(nullptr);
+        arr->push_back(str_to_json(element_value(ae)));
+        ae = element_forw(ae);
+      }
+    }
+    return arr;
+  }
+
+  /* Plain scalar variable */
+  char *s = value_cell(v);
+  if (!s) s = const_cast<char *>("");
+  if (integer_p(v)) {
+    try { return new njson(std::stoll(s)); } catch (...) {}
+  }
+  return new njson(std::string(s));
+}
+
 extern "C" int json_builtin(WORD_LIST *list) {
   const char *varname = nullptr;
   const char *json_string = nullptr;
@@ -710,10 +794,12 @@ extern "C" int json_builtin(WORD_LIST *list) {
   const char *selector = nullptr;
   const char *patch_arg = nullptr;   /* -p: JSON Patch (RFC 6902) */
   const char *merge_arg = nullptr;   /* -m: JSON Merge Patch (RFC 7396) */
+  const char *serialize_var = nullptr; /* -S: bash variable to serialize */
+  bool do_print = false;               /* -P: print result to stdout */
   int opt;
 
   reset_internal_getopt();
-  while ((opt = internal_getopt(list, const_cast<char *>("v:j:f:a:s:p:m:"))) != -1) {
+  while ((opt = internal_getopt(list, const_cast<char *>("v:j:f:a:s:p:m:S:P"))) != -1) {
     switch (opt) {
       CASE_HELPOPT;
     case 'v':
@@ -737,13 +823,90 @@ extern "C" int json_builtin(WORD_LIST *list) {
     case 'm':
       merge_arg = list_optarg;
       break;
+    case 'S':
+      serialize_var = list_optarg;
+      break;
+    case 'P':
+      do_print = true;
+      break;
     default:
       builtin_usage();
       return EX_USAGE;
     }
   }
 
-  /* -v is required. */
+  /* ----------------------------------------------------------------
+     -S path: serialize a bash variable to JSON.
+     Incompatible with -j, -f, -a (and stdin reading).
+     ---------------------------------------------------------------- */
+  if (serialize_var) {
+    /* No mixing with other JSON sources. */
+    if (json_string || filename || addr_string) {
+      builtin_error("-S cannot be combined with -j, -f, or -a");
+      return EX_USAGE;
+    }
+    /* Need at least one output. */
+    if (!varname && !do_print) {
+      builtin_error("-S requires -v VARNAME and/or -P");
+      return EX_USAGE;
+    }
+
+    njson *root = bash_var_to_json(serialize_var);
+    if (!root)
+      return EXECUTION_FAILURE;
+
+    /* Apply selector if given. */
+    if (selector) {
+      njson *selected = apply_selector(root, selector);
+      delete root;
+      if (!selected)
+        return EXECUTION_FAILURE;
+      root = selected;
+    }
+
+    /* Apply JSON Patch (RFC 6902) if requested. */
+    if (patch_arg) {
+      njson *patch = resolve_patch_arg(patch_arg, "p");
+      if (!patch) { delete root; return EXECUTION_FAILURE; }
+      njson *patched = nullptr;
+      try {
+        patched = new njson(root->patch(*patch));
+      } catch (const std::exception &e) {
+        builtin_error("json patch failed: %s", e.what());
+        delete patch;
+        delete root;
+        return EXECUTION_FAILURE;
+      }
+      delete patch;
+      delete root;
+      root = patched;
+    }
+
+    /* Apply JSON Merge Patch (RFC 7396) if requested. */
+    if (merge_arg) {
+      njson *merge = resolve_patch_arg(merge_arg, "m");
+      if (!merge) { delete root; return EXECUTION_FAILURE; }
+      root->merge_patch(*merge);
+      delete merge;
+    }
+
+    /* Print to stdout if requested — emit proper JSON (not display form). */
+    if (do_print) {
+      int    indent       = get_int_shvar("JSON_BASH_INDENT", 2);
+      bool   ensure_ascii = get_bool_shvar("JSON_BASH_ENSURE_ASCII", false);
+      printf("%s\n", root->dump(indent, ' ', ensure_ascii).c_str());
+    }
+
+    /* Store in a bash json variable if -v was given. */
+    if (varname)
+      return populate_var(varname, root);
+
+    /* No -v: root was only used for printing; free it. */
+    delete root;
+    return EXECUTION_SUCCESS;
+  }
+
+  /* -v is required for non-serialize operations. */
   if (!varname || *varname == '\0') {
     builtin_error("variable name required: use -v VARNAME");
     return EX_USAGE;
@@ -897,11 +1060,13 @@ extern "C" {
 
 const char *json_doc[] = {
     "Parse JSON and create bash variables from JSON data.",
+    "Serialize bash variables to JSON.",
     "",
     "Usage: json -v VARNAME [-j JSON | -f FILE | -a PTR] [-s POINTER] [-p PATCH] [-m MERGE]",
+    "       json -S VARNAME [-v DEST] [-P] [-s POINTER] [-p PATCH] [-m MERGE]",
     "",
     "Options:",
-    "  -v VARNAME    Name of the variable to create (required)",
+    "  -v VARNAME    Name of the variable to create / store results in",
     "  -j STRING     Parse JSON from a string argument (JSON5 comments allowed)",
     "  -f FILE       Parse JSON from a file          (JSON5 comments allowed)",
     "  -a POINTER    Use an existing JSON pointer (from VARNAME_[key])",
@@ -910,8 +1075,16 @@ const char *json_doc[] = {
     "                string or a hex pointer to an array of patch operations",
     "  -m MERGE      Apply a JSON Merge Patch (RFC 7396) — MERGE is an inline",
     "                JSON string or a hex pointer to a merge-patch object",
+    "  -S VARNAME    Serialize the bash variable VARNAME to JSON.",
+    "                Bash attributes are respected:",
+    "                  declare -A  (assoc array) → JSON object",
+    "                  declare -a  (indexed array) → JSON array",
+    "                  declare -i  (integer) → JSON number",
+    "                  plain string → JSON string",
+    "                Combine with -v to store the result and/or -P to print.",
+    "  -P            Print the resulting JSON to stdout (useful with -S).",
     "",
-    "If no -j, -f, or -a is given, JSON is read from stdin.",
+    "If no -j, -f, or -a is given (and -S is not used), JSON is read from stdin.",
     "",
     "Variable types created depend on the JSON type:",
     "  JSON object  -> associative arrays VARNAME and VARNAME_",
@@ -953,6 +1126,26 @@ const char *json_doc[] = {
     "  echo ${arr[0]}                  # foo",
     "  arr[0]=\"baz\"                    # updates first element",
     "",
+    "  # Serialize a bash string:",
+    "  name=\"Alice\"",
+    "  json -S name -P                 # prints: \"Alice\"",
+    "",
+    "  # Serialize a bash integer:",
+    "  declare -i count=42",
+    "  json -S count -P               # prints: 42",
+    "",
+    "  # Serialize an indexed array:",
+    "  declare -a fruits=(apple banana cherry)",
+    "  json -S fruits -P              # prints: [\"apple\",\"banana\",\"cherry\"]",
+    "",
+    "  # Serialize an associative array:",
+    "  declare -A person=([name]=Bob [age]=30)",
+    "  json -S person -P              # prints: {\"age\":30,\"name\":\"Bob\"}",
+    "",
+    "  # Serialize and store for further processing:",
+    "  json -S person -v doc",
+    "  echo ${doc[name]}              # Bob",
+    "",
     "  # JSON5: file with comments",
     "  json -v cfg -f config.json5",
     "",
@@ -988,7 +1181,7 @@ struct builtin json_struct = {
     json_builtin,                            /* function implementing the builtin */
     BUILTIN_ENABLED,                         /* initial flags for builtin */
     const_cast<char *const *>(json_doc),     /* array of long documentation strings */
-    const_cast<char *>("json -v VAR [-j JSON | -f FILE | -a PTR] [-s PTR] [-p PATCH] [-m MERGE]"), /* usage synopsis */
+    const_cast<char *>("json -v VAR [-j JSON|-f FILE|-a PTR] [-s PTR] [-p PATCH] [-m MERGE] | -S VAR [-v DEST] [-P] [-s PTR]"), /* usage synopsis */
     0                                        /* reserved for internal use */
 };
 

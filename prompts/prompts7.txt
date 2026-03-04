@@ -1,0 +1,6 @@
+let's add a way to serialize bash variable to json.
+* add a new arguments that takes a variable name to serialize
+* it should respect the attribute variables (integer, array assoc array)
+* the serialization can be store in a bash json var with -v
+* add an argument to optoinally print the result 
+* 

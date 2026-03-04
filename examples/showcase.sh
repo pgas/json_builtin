@@ -16,7 +16,7 @@ BOLD='\033[1m';  DIM='\033[2m';   RESET='\033[0m'
 CYAN='\033[36m'; GREEN='\033[32m'; YELLOW='\033[33m'
 BLUE='\033[34m'; RED='\033[31m';   MAGENTA='\033[35m'
 
-TOTAL_STEPS=11   # update when adding steps
+TOTAL_STEPS=12   # update when adding steps
 
 # ── helpers ───────────────────────────────────────────────
 
@@ -385,6 +385,62 @@ step10() {
   printf "  ${BOLD}${GREEN}Press any key for JSON Patch / Merge Patch …${RESET}\n"
 }
 
+step12() {
+  header "Serializing bash variables to JSON  (-S, -P)" 12
+  blank
+  comment "Serialize a plain string"
+  run_show 'mystr="hello world"
+  json -S mystr -P' \
+           bash -c "
+    enable -f '$SO_PATH' json
+    mystr='hello world'
+    json -S mystr -P"
+  blank
+  comment "Serialize a declare -i integer  →  JSON number"
+  run_show 'declare -i count=42
+  json -S count -P' \
+           bash -c "
+    enable -f '$SO_PATH' json
+    declare -i count=42
+    json -S count -P"
+  blank
+  comment "Serialize an indexed array  →  JSON array"
+  run_show 'declare -a colors=(red green blue)
+  json -S colors -P' \
+           bash -c "
+    enable -f '$SO_PATH' json
+    declare -a colors=(red green blue)
+    json -S colors -P"
+  blank
+  comment "Serialize an associative array  →  JSON object"
+  run_show 'declare -A person=([name]=Alice [score]=99)
+  json -S person -P' \
+           bash -c "
+    enable -f '$SO_PATH' json
+    declare -A person=([name]=Alice [score]=99)
+    json -S person -P"
+  blank
+  comment "Store serialized output as a live json variable (-v) for further use"
+  run_show 'declare -A cfg=([host]=localhost [port]=8080)
+  json -S cfg -v doc -P
+  echo \"port via var: \${doc[port]}\"' \
+           bash -c "
+    enable -f '$SO_PATH' json
+    declare -A cfg=([host]=localhost [port]=8080)
+    json -S cfg -v doc -P
+    echo \"port via var: \${doc[port]}\""
+  blank
+  comment "-S is composable with -s, -p, -m exactly like other sources"
+  run_show 'declare -A data=([x]=1 [y]=2)
+  json -S data -v result -m '\''\'''{\"z\":3}'\'\'''\'' -P' \
+           bash -c "
+    enable -f '$SO_PATH' json
+    declare -A data=([x]=1 [y]=2)
+    json -S data -v result -m '{\"z\":3}' -P"
+  printf "  ${BOLD}${GREEN}End of showcase.${RESET}  See README.md for full documentation.\n"
+
+}
+
 step11() {
   header "JSON Patch (RFC 6902) & JSON Merge Patch (RFC 7396)" 11
   blank
@@ -424,13 +480,12 @@ step11() {
     -m '{\"rem\":null,\"new\":\"hi\"}'
   echo \"a=\${doc[a]}  rem='\${doc[rem]}'  new=\${doc[new]}\""
   blank
-  printf "  ${BOLD}${GREEN}End of showcase.${RESET}  See README.md for full documentation.\n"
 }
 
 # ══════════════════════════════════════════════════════════
 # Main loop
 # ══════════════════════════════════════════════════════════
-STEPS=(step1 step2 step3 step4 step5 step6 step7 step8 step9 step10 step11)
+STEPS=(step1 step2 step3 step4 step5 step6 step7 step8 step9 step10 step11 step12)
 
 for step_fn in "${STEPS[@]}"; do
   "$step_fn"
