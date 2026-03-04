@@ -1,0 +1,10 @@
+- json5 support (remove comments)
+- error when invalid json
+- define what happens when variable are assigned
+  - when assigning a value to "var" replace the json object
+  - when assigining a valude to "var_"  the rhs needs to be a pointer to a json object, it needs to make a deep copy a the object before replacing the object
+  - when assigning to var[key] add or replace the object
+  - it should also handle array assignemnt grace fully
+- understand the pointer correctly
+- manipulate json correctly
+- add some JSON_BASH_XXX variables to configure pretty printing, use mapping for what is provided by the api

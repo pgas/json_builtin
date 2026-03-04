@@ -1,1 +1,28 @@
-prompts3.txt
+ok, I know wants to have something like a selector
+eg if I have a deep nested object like
+"'{
+  "level1": {
+    "level2": {
+      "level3": {
+        "value": "deep"
+      }
+    }
+  }
+}'"
+
+I would like to select "level3" directly doing somethign like
+json -v var -a '{
+  "level1": {
+    "level2": {
+      "level3": {
+        "value": "deep"
+      }
+    }
+  }
+}'
+json -v l3 -a var -s 'level1.level2.level3"
+
+I'm unsure what would be the best syntax.
+-s'[level1][level2][level3]' maybe 
+please if there is a well know tool or library that have an established syntax use that 
+
