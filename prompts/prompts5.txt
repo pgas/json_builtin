@@ -1,0 +1,3 @@
+add a script in examples showcasing the builtin.
+it should run in steps that fit in one screen (say 80x20 terminal) and allow to press any key to continue or q to exit.
+In the future when modigying the script also add to this showcase like you add tests and update the readme, please update the github instructions file

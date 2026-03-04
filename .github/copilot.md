@@ -268,6 +268,45 @@ exit 0
 - Cover both happy path and edge cases
 - Name file `test_<feature>.sh` and place in `tests/` directory
 
+## Showcase Script (`examples/showcase.sh`)
+
+The showcase is an interactive step-through demo script for the builtin. It runs
+in a standard 80×20 terminal, shows one feature per screen, and lets the user
+advance with any key or quit with `q`.
+
+**Run it:**
+```bash
+bash examples/showcase.sh           # auto-locates json.so
+bash examples/showcase.sh path/to/json.so
+```
+
+**Structure:**
+- Each feature has its own `stepN()` function
+- `TOTAL_STEPS` at the top of the script must always equal the number of steps
+- Each step calls `header "Title" N`, then prints content, then returns
+- Content must fit in ≤ 16 lines (the `header`, `hr`, and footer consume 4)
+- Use the `comment`, `run_show`, and `blank` helpers — do not use raw `echo` for
+  content lines, so formatting stays consistent
+
+**When to update the showcase:**
+
+| Scenario | Action |
+|---|---|
+| New option / feature added | Add a new `stepN()` function, increment `TOTAL_STEPS` |
+| Existing behaviour changed | Update the affected step |
+| New input source or flag | Add or update a step |
+| Bug fix only | No showcase change needed unless the fix affects user-visible behaviour |
+
+**Rules for new steps:**
+- Title (≤ 40 chars) passed to `header` must describe the feature clearly
+- Demonstrate real, runnable commands — use `run_show 'display text' bash -c "..."` so
+  both the command text *and* the actual output are shown
+- Keep `run_show` blocks short; complex patterns may need a `comment` introducing them
+- Never `source` or `enable` the builtin inside a `run_show` — the surrounding
+  `bash -c` subshell handles that
+- After adding a step, run `bash examples/showcase.sh /path/to/json.so` and verify
+  every screen fits comfortably
+
 ## What Copilot Should NOT Do
 
 ❌ **Never:**
@@ -334,6 +373,8 @@ When implementing a feature with Copilot assistance:
 - [ ] Help text in `json_doc[]` updated
 - [ ] Usage string in `json_struct` updated
 - [ ] Documented in README.md with examples
+- [ ] Showcase updated (`examples/showcase.sh`) — new step or existing step patched
+- [ ] `TOTAL_STEPS` counter in showcase matches the number of step functions
 - [ ] No bash symbol assumptions (test before relying)
 - [ ] No C/C++ interop violations (header order, etc.)
 
